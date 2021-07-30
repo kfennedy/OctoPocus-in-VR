@@ -1,0 +1,1417 @@
+---
+title: "OctoPocus in VR - Result Analysis"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    theme: lumen
+    highlight: default
+    code_folding: hide
+    number_sections: TRUE
+---
+
+# Tools & Libraries
+
+```{r}
+library(scales)
+library(ez)
+library(MASS)
+library(effsize)
+library(rcompanion)
+library(ARTool)
+library(emmeans)
+library(HH)
+library(rstatix)
+library(tidyverse)
+library(DescTools)
+
+
+normal_error <- function(d) {
+  n <- length(d)
+  qnorm(0.975) * (sd(d) /sqrt(n))
+}
+
+summary_with_ci <- function(d) {
+  tibble(
+    MeanValue = mean(d),
+    ErrorValue = normal_error(d),
+    LowerValue = MeanValue - ErrorValue,
+    UpperValue = MeanValue + ErrorValue
+  )
+}
+```
+# Load data
+
+```{r}
+trials <- read_csv(
+  "./data1.csv",
+  col_types = cols(
+    Participant = col_factor(),
+    Guide = col_factor(),
+    Set = col_factor(),
+    Phase = col_factor(),
+    Block = col_factor(),
+    Trial = col_character(),
+    TrialName = col_factor(),
+    TriggeredName = col_factor(),
+    Result = col_logical(),
+    Mode = col_factor(),
+    RestartCount = col_double(),
+    DrawTime = col_double(),
+    NoviceTime = col_double(),
+    EndTime = col_double(),
+    TriggerDuration = col_double(),
+    GripDuration = col_double(),
+    IdleDuration = col_double()
+  )
+) %>%
+  filter(Participant != "P3" & Participant != "P6") %>%
+  mutate(
+    Participant = droplevels(Participant),
+    Block = factor(Block),
+    InputTime = EndTime-NoviceTime,
+    IsOutlier = Phase == "Training" &
+           EndTime > mean(EndTime[Phase == "Training"]) + 3 * sd(EndTime[Phase == "Training"]))
+
+trials
+
+# Number of outliers
+a = sum(trials$IsOutlier == TRUE)
+b = sum(trials$Phase == "Training")
+(a/b)*100
+
+```
+
+# TIME
+
+## Trial Time
+```{r}
+trialtime_p_summary <- trials %>%
+  filter(Mode == "Novice", Phase == "Training" & Result == TRUE & IsOutlier == FALSE) %>%
+  group_by(Participant, Guide, Phase, Block) %>%
+  summarize(Mean = mean(EndTime), .groups="drop")
+
+# because P4 has zero novice trial in B3, we averaged values between that of B1 and B2
+newRow = c("P4", "Sheet", "Training", "B3", 12.201982)
+trialtime_p_summary = rbind(trialtime_p_summary, newRow)
+# because P11 has zero novice trial in B3, we averaged values between that of B1 and B2
+newRow = c("P11", "Sheet", "Training", "B3", 9.1895835)
+# merge new row into table
+trialtime_p_summary = rbind(trialtime_p_summary, newRow)
+# convert from character to numbers
+trialtime_p_summary$Mean <- as.numeric(as.character(trialtime_p_summary$Mean))
+trialtime_p_summary
+
+trialtime_octo <- subset(trialtime_p_summary,  Guide == "Octo", Mean, drop = TRUE)
+trialtime_sheet <- subset(trialtime_p_summary,  Guide == "Sheet", Mean, drop = TRUE)
+MeanDiffCI(trialtime_sheet, trialtime_octo)
+
+trialtime_b1 <- subset(trialtime_p_summary,  Block == "B1", Mean, drop = TRUE)
+trialtime_b2 <- subset(trialtime_p_summary,  Block == "B2", Mean, drop = TRUE)
+trialtime_b3 <- subset(trialtime_p_summary,  Block == "B3", Mean, drop = TRUE)
+MeanDiffCI(trialtime_b2, trialtime_b1)
+MeanDiffCI(trialtime_b3, trialtime_b1)
+
+trialtime_summary <- trialtime_p_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(Mean), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+trialtime_summary
+```
+
+### Graph
+
+```{r}
+pd <- position_dodge(0.4)
+
+ggplot(data=trialtime_summary, aes(x=Block, y=MeanValue, group=Guide)) +
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_line(aes(color=Guide), position=pd)+
+  geom_point(aes(color=Guide, shape=Guide), size=3, position=pd)+
+  geom_text(aes(label=format(round(MeanValue,1),nsmall=1), color=Guide), show.legend = FALSE,
+            size=4, nudge_x=ifelse(trialtime_summary$Guide=="Octo", -0.3, 0.3),
+            nudge_y=ifelse(trialtime_summary$Guide=="Octo", -0.4, 0.4)
+  )+
+  expand_limits(y=c(0,11.5))+
+  labs(x="Block", y="Time (s)")+
+  scale_x_discrete(labels=c("B1-Train", "B2-Train", "B3-Train"))+
+  scale_color_manual(values = c("#d35400", "#95a5a6"),labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_shape_discrete(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_linetype(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  facet_grid(scales = "free", space = "free")+
+  theme_bw(base_size = 12)+
+  theme(legend.background = element_blank(), legend.title = element_blank(),
+        legend.position = c(0.5, 0.1), legend.direction = "horizontal",
+        panel.border = element_blank(),
+        axis.line = element_line(color = 'grey'),
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+### Assumptions
+Shapiro test p < 0.05. The distribution of the residuals is not normal.
+
+```{r}
+m = aov(Mean ~ Block*Guide + Error(Participant), data = trialtime_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### Data Transformation
+Shapiro test p > 0.05. The distribution of the residuals is now normal.
+
+```{r}
+trialtime_p_summary$TransVal = log(trialtime_p_summary$Mean)
+m = aov(TransVal ~ Block*Guide + Error(Participant), data = trialtime_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### ANOVA
+
+```{r}
+ezANOVA(
+  trialtime_p_summary,
+  dv = log(Mean),
+  wid = Participant,
+  within = c(Guide, Block)
+)
+```
+
+### Pairwise Comparison
+```{r}
+pairwise.t.test(trialtime_p_summary$TransVal, 
+                trialtime_p_summary$Block, 
+                paired=TRUE, 
+                p.adj="bonf")
+```
+
+## Reaction Time
+```{r}
+reactiontime_p_summary <- trials %>%
+  filter(Mode == "Novice" & Phase == "Training" & Result == TRUE & IsOutlier == FALSE) %>%
+  group_by(Participant, Guide, Phase, Block) %>%
+  summarize(Mean = mean(NoviceTime), .groups="drop")
+
+# because P4 has zero novice trial in B3, we averaged values between that of B1 and B2
+newRow = c("P4", "Sheet", "Training", "B3", 0.93730355)
+reactiontime_p_summary = rbind(reactiontime_p_summary, newRow)
+# because P11 has zero novice trial in B3, we averaged values between that of B1 and B2
+newRow = c("P11", "Sheet", "Training", "B3", 1.48358335)
+# merge new row into table
+reactiontime_p_summary = rbind(reactiontime_p_summary, newRow)
+# convert from character to numbers
+reactiontime_p_summary$Mean <- as.numeric(as.character(reactiontime_p_summary$Mean))
+reactiontime_p_summary
+
+reactiontime_octo <- subset(reactiontime_p_summary,  Guide == "Octo", Mean, drop = TRUE)
+reactiontime_sheet <- subset(reactiontime_p_summary,  Guide == "Sheet", Mean, drop = TRUE)
+MeanDiffCI(reactiontime_sheet, reactiontime_octo)
+
+reactiontime_summary <- reactiontime_p_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(Mean), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+reactiontime_summary
+```
+
+### Graph
+
+```{r}
+pd <- position_dodge(0.4)
+
+ggplot(data=reactiontime_summary, aes(x=Block, y=MeanValue, group=Guide)) +
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_line(aes(color=Guide), position=pd)+
+  geom_point(aes(color=Guide, shape=Guide), size=3, position=pd)+
+  geom_text(aes(label=format(round(MeanValue,1),nsmall=1), color=Guide), show.legend = FALSE,
+            size=4, nudge_x=ifelse(reactiontime_summary$Guide=="Octo", -0.1, 0.1),
+            nudge_y=ifelse(reactiontime_summary$Guide=="Octo", 0.8, -0.8)
+  )+
+  expand_limits(y=c(0,11.5))+
+  labs(x="Block", y="Time (s)")+
+  scale_x_discrete(labels=c("B1-Train", "B2-Train", "B3-Train"))+
+  scale_color_manual(values = c("#d35400", "#95a5a6"))+
+  # facet_grid(scales = "free", space = "free")+
+  theme_bw(base_size = 12)+
+  theme(panel.border = element_blank(),
+        axis.line = element_line(color = 'grey'),
+        legend.position = "none",
+        # legend.position = c(0.8, 0.85), legend.direction = "vertical",
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+### Assumptions
+Shapiro test p > 0.05. The distribution of the residuals is normal.
+
+```{r}
+m = aov(Mean ~ Block*Guide + Error(Participant), data = reactiontime_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+### ANOVA
+
+```{r}
+ezANOVA(
+  reactiontime_p_summary,
+  dv = Mean,
+  wid = Participant,
+  within = c(Guide, Block)
+)
+```
+
+## Input Time
+```{r}
+inputtime_p_summary <- trials %>%
+  filter(Mode == "Novice", Phase == "Training" & Result == TRUE & IsOutlier == FALSE) %>%
+  group_by(Participant, Guide, Phase, Block) %>%
+  summarize(Mean = mean(InputTime), .groups="drop")
+
+# because P4 has zero novice trial in B3, we averaged values between that of B1 and B2
+newRow = c("P4", "Sheet", "Training", "B3", 11.2646785)
+inputtime_p_summary = rbind(inputtime_p_summary, newRow)
+# because P11 has zero novice trial in B3, we averaged values between that of B1 and B2
+newRow = c("P11", "Sheet", "Training", "B3", 7.706)
+# merge new row into table
+inputtime_p_summary = rbind(inputtime_p_summary, newRow)
+# convert from character to numbers
+inputtime_p_summary$Mean <- as.numeric(as.character(inputtime_p_summary$Mean))
+inputtime_p_summary
+
+inputtime_octo <- subset(inputtime_p_summary,  Guide == "Octo", Mean, drop = TRUE)
+inputtime_sheet <- subset(inputtime_p_summary,  Guide == "Sheet", Mean, drop = TRUE)
+MeanDiffCI(inputtime_sheet, inputtime_octo)
+
+inputtime_b1 <- subset(inputtime_p_summary,  Block == "B1", Mean, drop = TRUE)
+inputtime_b2 <- subset(inputtime_p_summary,  Block == "B2", Mean, drop = TRUE)
+inputtime_b3 <- subset(inputtime_p_summary,  Block == "B3", Mean, drop = TRUE)
+MeanDiffCI(inputtime_b2, inputtime_b1)
+MeanDiffCI(inputtime_b3, inputtime_b1)
+
+inputtime_summary <- inputtime_p_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(Mean), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+inputtime_summary
+
+```
+
+### Graph
+
+```{r}
+pd <- position_dodge(0.4)
+
+ggplot(data=inputtime_summary, aes(x=Block, y=MeanValue, group=Guide)) +
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_line(aes(color=Guide), position=pd)+
+  geom_point(aes(color=Guide, shape=Guide), size=3, position=pd)+
+  geom_text(aes(label=format(round(MeanValue,1),nsmall=1), color=Guide), show.legend = FALSE,
+            size=4, nudge_x=ifelse(inputtime_summary$Guide=="Octo", -0.3, 0.3),
+            nudge_y=ifelse(inputtime_summary$Guide=="Octo", -0.4, 0.4)
+  )+
+  expand_limits(y=c(0,11.5))+
+  labs(x="Block", y="Time (s)")+
+  scale_x_discrete(labels=c("B1-Train", "B2-Train", "B3-Train"))+
+  scale_color_manual(values = c("#d35400", "#95a5a6"))+
+  # facet_grid(scales = "free", space = "free")+
+  theme_bw(base_size = 12)+
+  theme(legend.position = "none",
+        #legend.position = c(0.8, 0.15), legend.direction = "vertical",
+        # legend.background = element_blank(),
+        panel.border = element_blank(),
+        axis.line = element_line(color = 'grey'),
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+### Assumptions
+Shapiro test p < 0.05. The distribution of the residuals is not normal.
+
+```{r}
+m = aov(Mean ~ Block*Guide + Error(Participant), data = inputtime_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### Data Transformation
+Shapiro test p > 0.05. The distribution of the residuals is now normal.
+
+```{r}
+inputtime_p_summary$TransVal = sqrt(inputtime_p_summary$Mean)
+m = aov(TransVal ~ Block*Guide + Error(Participant), data = inputtime_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### ANOVA
+
+```{r}
+ezANOVA(
+  inputtime_p_summary,
+  dv = TransVal,
+  wid = Participant,
+  within = c(Guide, Block)
+)
+```
+
+### Pairwise Comparison
+```{r}
+pairwise.t.test(inputtime_p_summary$TransVal, 
+                inputtime_p_summary$Block, 
+                paired=TRUE, 
+                p.adj="bonf")
+```
+
+
+
+# ACCURACY
+
+## Overall Training
+```{r}
+accuracy_overalltraining_p_summary <- trials %>%
+  filter(Phase == "Training" & !IsOutlier) %>%
+  group_by(Participant, Guide, Phase, Block) %>%
+  summarize(Mean = mean(Result), .groups="drop")
+accuracy_overalltraining_p_summary
+
+overalltrainingacc_octo <- subset(accuracy_overalltraining_p_summary,  Guide == "Octo", Mean, drop = TRUE)
+overalltrainingacc_sheet <- subset(accuracy_overalltraining_p_summary,  Guide == "Sheet", Mean, drop = TRUE)
+MeanDiffCI(overalltrainingacc_sheet, overalltrainingacc_octo)
+
+accuracy_overalltraining_summary <- accuracy_overalltraining_p_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(Mean), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+
+accuracy_overalltraining_summary
+```
+
+### Graph
+
+```{r}
+pd <- position_dodge(0.4)
+
+ggplot(data=accuracy_overalltraining_summary, aes(x=Block, y=MeanValue, group=Guide)) +
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_line(aes(color=Guide), position=pd)+
+  geom_point(aes(color=Guide, shape=Guide), size=3, position=pd)+
+  geom_text(aes(label=sprintf("%.0f", 100*MeanValue), color=Guide), show.legend = FALSE,
+            size=4, nudge_x=ifelse(accuracy_overalltraining_summary$Guide=="Octo", -0.3, 0.3),
+            nudge_y=ifelse(accuracy_overalltraining_summary$Guide=="Octo", 0.1, -0.1)
+  )+
+  scale_y_continuous(labels = function(x) paste0(x*100),breaks = seq(0,1,0.25))+
+  # scale_y_continuous(labels = label_percent(), breaks = seq(0,1,0.25))+
+  expand_limits(y=c(0,1))+
+  labs(x="Block", y="Accuracy (%)")+
+  scale_x_discrete(labels=c("B1-Train", "B2-Train", "B3-Train"))+
+  scale_color_manual(values = c("#d35400", "#95a5a6"),labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_shape_discrete(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_linetype(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  facet_grid(scales = "free", space = "free")+
+  theme_bw(base_size = 12)+
+  theme(legend.background = element_blank(), legend.title = element_blank(),
+        legend.position = c(0.5, 0.1), legend.direction = "horizontal",
+        panel.border = element_blank(),
+        axis.line = element_line(color = 'grey'),
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+### Assumptions
+Shapiro test p > 0.05. The distribution of the residuals is normal.
+
+```{r}
+m = aov(Mean ~ Block*Guide + Error(Participant), data = accuracy_overalltraining_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+
+### ANOVA
+```{r}
+ezANOVA(
+  accuracy_overalltraining_p_summary,
+  dv = Mean,
+  wid = Participant,
+  within = c(Guide, Block)
+)
+```
+
+## Expert Training
+
+```{r}
+accuracy_p_expert_summary <- trials %>%
+  filter(Phase == "Training" & Mode == "Expert" & !IsOutlier) %>%
+  group_by(Participant, Guide, Phase, Block) %>%
+  summarize(Mean = mean(Result), .groups="drop")
+accuracy_p_expert_summary
+
+expertacc_octo <- subset(accuracy_p_expert_summary,  Guide == "Octo", Mean, drop = TRUE)
+expertacc_sheet <- subset(accuracy_p_expert_summary,  Guide == "Sheet", Mean, drop = TRUE)
+MeanDiffCI(expertacc_sheet, expertacc_octo)
+
+expertacc_b1 <- subset(accuracy_p_expert_summary,  Block == "B1", Mean, drop = TRUE)
+expertacc_b2 <- subset(accuracy_p_expert_summary,  Block == "B2", Mean, drop = TRUE)
+expertacc_b3 <- subset(accuracy_p_expert_summary,  Block == "B3", Mean, drop = TRUE)
+MeanDiffCI(expertacc_b3, expertacc_b2)
+
+accuracy_expert_summary <- accuracy_p_expert_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(Mean), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+accuracy_expert_summary
+```
+
+
+### Graph
+
+```{r}
+ggplot(data=accuracy_expert_summary, aes(x=Block, y=MeanValue, group=Guide)) +
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_line(aes(color=Guide), position=pd)+
+  geom_point(aes(color=Guide, shape=Guide), size=3, position=pd)+
+  geom_text(aes(label=sprintf("%.0f", 100*MeanValue), color=Guide), show.legend = FALSE,
+            size=4, nudge_x=ifelse(accuracy_expert_summary$Guide=="Octo", -0.3, 0.3),
+            nudge_y=ifelse(accuracy_expert_summary$Guide=="Octo", 0.1, -0.1)
+  )+
+  scale_y_continuous(labels = function(x) paste0(x*100),breaks = seq(0,1,0.25))+
+  # scale_y_continuous(labels = label_percent(), breaks = seq(0,1,0.25))+
+  expand_limits(y=c(0,1)) +
+  labs(x="Block", y="Accuracy (%)")+
+  scale_x_discrete(labels=c("B1-Train", "B2-Train", "B3-Train"))+
+  scale_color_manual(values = c("#d35400", "#95a5a6"))+
+  facet_grid(scales = "free", space = "free")+
+  theme_bw(base_size = 12)+
+  theme(panel.border = element_blank(),
+        axis.line = element_line(color = 'grey'),
+        legend.position = "none",
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+
+
+### Assumptions
+Shapiro test p > 0.05. The distribution of the residuals is normal.
+
+```{r}
+m = aov(Mean ~ Block*Guide + Error(Participant), data = accuracy_p_expert_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### ANOVA
+```{r}
+ezANOVA(
+  accuracy_p_expert_summary,
+  dv = Mean,
+  wid = Participant,
+  within = c(Guide, Block)
+)
+```
+
+### Pairwise Comparison
+```{r}
+pairwise.t.test(accuracy_p_expert_summary$Mean, 
+                accuracy_p_expert_summary$Block, 
+                paired=TRUE, 
+                p.adj="bonf")
+```
+
+## Novice Training
+
+```{r}
+accuracy_p_novice_summary <- trials %>%
+  filter(Phase == "Training" & Mode == "Novice" & !IsOutlier) %>%
+  group_by(Participant, Guide, Phase, Block) %>%
+  summarize(Mean = mean(Result), .groups="drop")
+
+# because P11 has zero novice trial in B3, we averaged values between that of B1 and B2
+newRow = c("P11", "Sheet", "Training", "B3", 0.67857145)
+# merge new row into table
+accuracy_p_novice_summary = rbind(accuracy_p_novice_summary, newRow)
+# convert from character to numbers
+accuracy_p_novice_summary$Mean <- as.numeric(as.character(accuracy_p_novice_summary$Mean))
+
+accuracy_p_novice_summary
+
+noviceacc_octo <- subset(accuracy_p_novice_summary,  Guide == "Octo", Mean, drop = TRUE)
+noviceacc_sheet <- subset(accuracy_p_novice_summary,  Guide == "Sheet", Mean, drop = TRUE)
+MeanDiffCI(noviceacc_sheet, noviceacc_octo)
+
+accuracy_novice_summary <- accuracy_p_novice_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(Mean), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+accuracy_novice_summary
+```
+
+
+### Graph
+
+```{r}
+pd <- position_dodge(0.4)
+
+ggplot(data=accuracy_novice_summary, aes(x=Block, y=MeanValue, group=Guide)) +
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_line(aes(color=Guide), position=pd)+
+  geom_point(aes(color=Guide, shape=Guide), size=3, position=pd)+
+  geom_text(aes(label=sprintf("%.0f", 100*MeanValue), color=Guide), show.legend = FALSE,
+            size=4, nudge_x=ifelse(accuracy_novice_summary$Guide=="Octo", -0.3, 0.3),
+            nudge_y=ifelse(accuracy_novice_summary$Guide=="Octo", 0.05, -0.05)
+  )+
+  scale_y_continuous(labels = function(x) paste0(x*100),breaks = seq(0,1,0.25))+
+  # scale_y_continuous(labels = label_percent(), breaks = seq(0,1,0.25))+
+  expand_limits(y=c(0,1))+
+  labs(x="Block", y="Accuracy (%)")+
+  scale_x_discrete(labels=c("B1-Train", "B2-Train", "B3-Train"))+
+  scale_color_manual(values = c("#d35400", "#95a5a6"))+
+  facet_grid(scales = "free", space = "free")+
+  theme_bw(base_size = 12)+
+  theme(panel.border = element_blank(),
+        axis.line = element_line(color = 'grey'),
+        legend.position = "none",
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+
+
+### Assumptions
+Shapiro test p > 0.05. The distribution of the residuals is normal.
+
+```{r}
+m = aov(Mean ~ Block*Guide + Error(Participant), data = accuracy_p_novice_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### ANOVA
+```{r}
+ezANOVA(
+  accuracy_p_novice_summary,
+  dv = Mean,
+  wid = Participant,
+  within = c(Guide, Block)
+)
+```
+
+## Guess (Pre-Test)
+
+```{r}
+accuracy_pretest_p_summary <- trials %>%
+  filter(Phase == "PreTest" & !IsOutlier) %>%
+  group_by(Participant, Guide, Phase, Block) %>%
+  summarize(Mean = mean(Result), .groups="drop")
+accuracy_pretest_p_summary
+
+accuracy_pretest_summary <- accuracy_pretest_p_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(Mean), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+
+pretestacc_octo <- subset(accuracy_pretest_p_summary,  Guide == "Octo", Mean, drop = TRUE)
+pretestacc_sheet <- subset(accuracy_pretest_p_summary,  Guide == "Sheet", Mean, drop = TRUE)
+MeanDiffCI(pretestacc_sheet, pretestacc_octo)
+
+accuracy_pretest_summary
+```
+### Graph
+
+```{r}
+ggplot(data=accuracy_pretest_summary, aes(x=Guide, y=MeanValue, fill = Guide)) +
+  geom_bar(size=3,stat="identity")+
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_text(aes(label=sprintf("%.0f", 100*MeanValue), color=Guide),
+            show.legend = FALSE,
+            size=4, nudge_y = 0.1
+  )+
+  scale_y_continuous(labels = function(x) paste0(x*100),breaks = seq(0,1,0.25))+
+  # scale_y_continuous(labels = label_percent(), breaks = seq(0,1,0.25))+
+  expand_limits(y=c(0,1))+
+  labs(x="Guide", y="Accuracy (%)")+
+  scale_x_discrete(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_fill_manual(values = c("#d35400", "#95a5a6"),labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_color_manual(values = c("#d35400", "#95a5a6"),labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_shape_discrete(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_linetype(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  theme_bw(base_size = 12)+
+  theme(legend.position = "none", legend.direction = "horizontal",
+        panel.border = element_blank(),
+        axis.line = element_line(color = 'grey'),
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+
+
+### Assumptions
+Shapiro test p > 0.05. The distribution of the residuals is normal.
+
+```{r}
+m = aov(Mean ~ Guide + Error(Participant), data = accuracy_pretest_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### ANOVA
+
+```{r}
+ezANOVA(
+  accuracy_pretest_p_summary,
+  dv = Mean,
+  wid = Participant,
+  within = c(Guide)
+)
+```
+
+## Recall (Test)
+
+```{r}
+accuracy_test_p_summary <- trials %>%
+  filter(Phase == "Test" & !IsOutlier) %>%
+  group_by(Participant, Guide, Phase, Block) %>%
+  summarize(Mean = mean(Result), .groups="drop")
+accuracy_test_p_summary
+
+maintest_octo <- subset(accuracy_test_p_summary,  Guide == "Octo", Mean, drop = TRUE)
+maintest_sheet <- subset(accuracy_test_p_summary,  Guide == "Sheet", Mean, drop = TRUE)
+MeanDiffCI(maintest_sheet, maintest_octo)
+
+accuracy_test_summary <- accuracy_test_p_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(Mean), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+
+acctest_b1 <- subset(accuracy_test_p_summary,  Block == "B1", Mean, drop = TRUE)
+acctest_b2 <- subset(accuracy_test_p_summary,  Block == "B2", Mean, drop = TRUE)
+acctest_b3 <- subset(accuracy_test_p_summary,  Block == "B3", Mean, drop = TRUE)
+MeanDiffCI(acctest_b2, acctest_b1)
+MeanDiffCI(acctest_b3, acctest_b2)
+
+accuracy_test_summary
+```
+
+
+### Graph
+
+```{r}
+pd <- position_dodge(0.4)
+
+ggplot(data=accuracy_test_summary, aes(x=Block, y=MeanValue, group=Guide)) +
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_line(aes(color=Guide), position=pd)+
+  geom_point(aes(color=Guide, shape=Guide), size=3, position=pd)+
+  geom_text(aes(label=sprintf("%.0f", 100*MeanValue), color=Guide),
+            size=4, nudge_x=ifelse(accuracy_test_summary$Guide=="Octo", -0.4, 0.4),
+            nudge_y=ifelse(accuracy_test_summary$Guide=="Octo", 0.1, -0.1)
+  )+
+  scale_y_continuous(labels = function(x) paste0(x*100),breaks = seq(0,1,0.25))+
+  # scale_y_continuous(labels = label_percent(), breaks = seq(0,1,0.25))+
+  expand_limits(y=c(0,1))+
+  labs(x="Block", y="Accuracy (%)")+
+  scale_x_discrete(labels=c("B1-Test", "B2-Test", "B3-Test"))+
+  scale_color_manual(values = c("#d35400", "#95a5a6"),labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_shape_discrete(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_linetype(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  facet_grid(scales = "free", space = "free")+
+  theme_bw(base_size = 12)+
+  theme(legend.background = element_blank(), legend.title = element_blank(),
+        legend.position = c(0.5, 0.1), legend.direction = "horizontal",
+        panel.border = element_blank(),
+        axis.line = element_line(color = 'grey'),
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+
+
+### Assumptions
+Shapiro test p > 0.05. The distribution of the residuals is normal.
+
+```{r}
+m = aov(Mean ~ Block*Guide + Error(Participant), data = accuracy_test_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### ANOVA
+```{r}
+ezANOVA(
+  accuracy_test_p_summary,
+  dv = Mean,
+  wid = Participant,
+  within = c(Guide, Block)
+)
+```
+
+### Pairwise Comparison
+```{r}
+pairwise.t.test(accuracy_test_p_summary$Mean, 
+                accuracy_test_p_summary$Block, 
+                paired=TRUE, 
+                p.adj="bonf")
+```
+
+## Incidental Learning (Post-test)
+
+```{r}
+# excluding targets
+accuracy_posttest_p_summary <- trials %>%
+  filter(Phase == "PostTest" & !IsOutlier) %>%
+  filter(TrialName != "Abu Dhabi" & TrialName != "Amsterdam" & TrialName != "Dubai" & TrialName != "Los Angeles" & TrialName != "Madrid" & TrialName != "Paris" & TrialName != "Singapore" & TrialName != "Tokyo" & TrialName != "Austin" & TrialName != "Doha" & TrialName != "Frankfurt" & TrialName != "Houston" & TrialName != "Milan" & TrialName != "Prague" & TrialName != "Seoul" & TrialName != "Toronto") %>%
+  group_by(Participant, Guide, Phase, Block) %>%
+  summarize(Mean = mean(Result), .groups="drop")
+accuracy_posttest_p_summary
+
+accuracyposttest_octo <- subset(accuracy_posttest_p_summary,  Guide == "Octo", Mean, drop = TRUE)
+accuracyposttest_sheet <- subset(accuracy_posttest_p_summary,  Guide == "Sheet", Mean, drop = TRUE)
+MeanDiffCI(accuracyposttest_octo, accuracyposttest_sheet)
+
+accuracy_posttest_summary <- accuracy_posttest_p_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(Mean), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+accuracy_posttest_summary
+```
+
+### Graph
+
+```{r}
+ggplot(data=accuracy_posttest_summary, aes(x=Guide, y=MeanValue, fill = Guide)) +
+  geom_bar(size=3,stat="identity")+
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_text(aes(label=sprintf("%.0f", 100*MeanValue), color=Guide),
+            show.legend = FALSE,
+            size=4, nudge_y = 0.05, nudge_x = 0.3
+  )+
+  scale_y_continuous(labels = function(x) paste0(x*100),breaks = seq(0,1,0.25))+
+  # scale_y_continuous(labels = label_percent(), breaks = seq(0,1,0.25))+
+  expand_limits(y=c(0,1))+
+  labs(x="Guide", y="Accuracy (%)")+
+  scale_x_discrete(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_fill_manual(values = c("#d35400", "#95a5a6"),labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_color_manual(values = c("#d35400", "#95a5a6"),labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_shape_discrete(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_linetype(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  theme_bw(base_size = 12)+
+  theme(legend.position = "none", legend.direction = "horizontal",
+        panel.border = element_blank(),
+        axis.line = element_line(color = 'grey'),
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+
+
+### Assumptions
+Shapiro test p > 0.05. The distribution of the residuals is normal.
+
+```{r}
+m = aov(Mean ~ Guide + Error(Participant), data = accuracy_posttest_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### ANOVA
+
+```{r}
+ezANOVA(
+  accuracy_posttest_p_summary,
+  dv = Mean,
+  wid = Participant,
+  within = c(Guide)
+)
+```
+
+## Learning Curve (combined, only 8 trained gestures)
+
+```{r}
+targets <- c("Abu Dhabi", "Amsterdam", "Dubai", "Los Angeles", "Madrid", "Paris", "Singapore", "Tokyo", "Austin", "Doha", "Frankfurt", "Houston", "Milan", "Prague", "Seoul", "Toronto")
+
+curve_p_summary <- trials %>%
+  filter(TrialName %in% targets & Phase!="Training" & !IsOutlier) %>%
+  mutate(PhaseName = ifelse(Phase=="Test" & Block=="B1", "Test B1",
+                    ifelse(Phase=="Test" & Block=="B2", "Test B2",
+                    ifelse(Phase=="Test" & Block=="B3", "Test B3",
+                    ifelse(Phase=="PreTest", "PreTest",
+                    ifelse(Phase=="PostTest", "PostTest",NA)))))) %>%
+  mutate(PhaseName = fct_relevel(PhaseName, 
+            "PreTest", "Test B1", "Test B2", "Test B3", "PostTest")) %>%
+  mutate(PhaseName = as.factor(PhaseName)) %>%
+  group_by(Participant, Guide, PhaseName) %>%
+  summarize(Mean = mean(Result), .groups="drop")
+curve_p_summary
+
+curve_summary <- curve_p_summary %>%
+  group_by(Guide, PhaseName) %>%
+  summarize(summary_with_ci(Mean), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+curve_summary
+
+
+curve_testB3 <- subset(curve_p_summary,  PhaseName == "Test B3", Mean, drop = TRUE)
+curve_posttest <- subset(curve_p_summary,  PhaseName == "PostTest", Mean, drop = TRUE)
+MeanDiffCI(curve_posttest, curve_testB3)
+```
+
+### Graph
+
+```{r}
+pd <- position_dodge(0.4)
+
+ggplot(data=curve_summary, aes(x=PhaseName, y=MeanValue, group=Guide)) +
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_line(aes(color=Guide), position=pd)+
+  geom_point(aes(color=Guide, shape=Guide), size=3, position=pd)+
+  geom_text(aes(label=sprintf("%.0f", 100*MeanValue), color=Guide),
+            size=4, nudge_x=ifelse(curve_summary$Guide=="Octo", -0.3, 0.3),
+            nudge_y=ifelse(curve_summary$Guide=="Octo", 0.1, -0.1),
+            show.legend = FALSE
+  )+
+  scale_y_continuous(labels = function(x) paste0(x*100),breaks = seq(0,1,0.25))+
+  # scale_y_continuous(labels = label_percent(), breaks = seq(0,1,0.25))+
+  expand_limits(y=c(0,1))+
+  labs(x="Phase", y="Accuracy (%)")+
+  # scale_x_discrete(labels=c("B1-Test", "B2-Test", "B3-Test"))+
+  scale_color_manual(values = c("#d35400", "#95a5a6"),labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_shape_discrete(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_linetype(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  facet_grid(scales = "free", space = "free")+
+  theme_bw(base_size = 12)+
+  theme(legend.background = element_blank(), legend.title = element_blank(),
+        legend.position = c(0.5, 0.1), legend.direction = "horizontal",
+        panel.border = element_blank(),
+        axis.line = element_line(color = 'grey'),
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+### Assumptions
+Shapiro test p > 0.05. The distribution of the residuals is normal.
+
+```{r}
+m = aov(Mean ~ PhaseName*Guide + Error(Participant), data = curve_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### ANOVA
+```{r}
+# curve_p_summary_new = filter(curve_p_summary, PhaseName=="Test B3" | PhaseName=="PostTest")
+# curve_p_summary_new
+
+ezANOVA(
+  curve_p_summary,
+  dv = Mean,
+  wid = Participant,
+  within = c(Guide, PhaseName)
+)
+```
+
+### Pairwise Comparison
+```{r}
+pairwise.t.test(curve_p_summary$Mean, 
+                curve_p_summary$PhaseName, 
+                paired=TRUE, 
+                p.adj="bonf")
+```
+
+# OTHERS
+
+## Expert Mode Rate (during Training)
+```{r}
+expertproportion_p_summary <- trials %>%
+  filter(Phase == "Training" & !IsOutlier) %>%
+  group_by(Participant, Guide, Phase, Block) %>%
+  summarize(ExpertCount = sum(Mode=="Expert"), 
+            Total = sum(Mode=="Novice") + sum(Mode=="Expert"),
+            ExpertPercent = (sum(Mode=="Expert")/Total),
+            .groups="drop")
+expertproportion_p_summary
+
+expertpro_octo <- subset(expertproportion_p_summary,  Guide == "Octo", ExpertPercent, drop = TRUE)
+expertpro_sheet <- subset(expertproportion_p_summary,  Guide == "Sheet", ExpertPercent, drop = TRUE)
+MeanDiffCI(expertpro_sheet, expertpro_octo)
+
+expertpro_b1 <- subset(expertproportion_p_summary,  Block == "B1", ExpertPercent, drop = TRUE)
+expertpro_b2 <- subset(expertproportion_p_summary,  Block == "B2", ExpertPercent, drop = TRUE)
+expertpro_b3 <- subset(expertproportion_p_summary,  Block == "B3", ExpertPercent, drop = TRUE)
+MeanDiffCI(expertpro_b2, expertpro_b1)
+MeanDiffCI(expertpro_b3, expertpro_b1)
+
+expertproportion_summary <- expertproportion_p_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(ExpertPercent), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+expertproportion_summary
+```
+
+### Graph
+
+```{r}
+pd <- position_dodge(0.4)
+
+ggplot(data=expertproportion_summary, aes(x=Block, y=MeanValue, group=Guide)) +
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_line(aes(color=Guide), position=pd)+
+  geom_point(aes(color=Guide, shape=Guide), size=3, position=pd)+
+  geom_text(aes(label=sprintf("%.0f", 100*MeanValue), color=Guide),
+            size=4, nudge_x=ifelse(expertproportion_summary$Guide=="Octo", -0.35, 0.35),
+            nudge_y=ifelse(expertproportion_summary$Guide=="Octo", -0.15, 0.15)
+  )+
+  scale_y_continuous(labels = function(x) paste0(x*100),breaks = seq(0,1,0.25))+
+  # scale_y_continuous(labels = label_percent(), breaks = seq(0,1,0.25))+
+  expand_limits(y=c(0,1))+
+  labs(x="Block", y="Usage Rate (%)")+
+  scale_x_discrete(labels=c("B1-Train", "B2-Train", "B3-Train"))+
+  scale_color_manual(values = c("#d35400", "#95a5a6"),labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_shape_discrete(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  scale_linetype(labels=c("OCTOPOCUS","CRIBSHEET"))+
+  facet_grid(scales = "free", space = "free")+
+  theme_bw(base_size = 12)+
+  theme(legend.background = element_blank(), legend.title = element_blank(),
+        legend.position = c(0.5, 0.1), legend.direction = "horizontal",
+        panel.border = element_blank(),
+        axis.line = element_line(color = 'grey'),
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+### Assumptions
+Shapiro test p > 0.05. The distribution of the residuals is normal.
+
+```{r}
+m = aov(ExpertPercent ~ Block*Guide + Error(Participant), data = expertproportion_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### ANOVA
+```{r}
+ezANOVA(
+  expertproportion_p_summary,
+  dv = ExpertPercent,
+  wid = Participant,
+  within = c(Guide, Block)
+)
+```
+
+### Pairwise Comparison
+```{r}
+pairwise.t.test(expertproportion_p_summary$ExpertPercent, 
+                expertproportion_p_summary$Block, 
+                paired=TRUE, 
+                p.adj="bonf")
+```
+
+## Exploration Mode Rate (during Training)
+
+```{r}
+exploreprop_p_summary <- trials %>%
+  filter(Phase == "Training" & !IsOutlier) %>%
+  mutate(isExploring = ifelse(GripDuration>0, 1, 0)) %>%
+  group_by(Participant, Guide, Phase, Block) %>%
+  summarize(Frequency = sum(isExploring),
+            Total = sum(Mode=="Novice") + sum(Mode=="Expert"),
+            Proportion = (Frequency/Total),
+            .groups="drop")
+exploreprop_p_summary
+
+exploreprop_summary <- exploreprop_p_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(Proportion), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+exploreprop_summary
+
+explorepro_octo <- subset(exploreprop_p_summary,  Guide == "Octo", Proportion, drop = TRUE)
+explorepro_sheet <- subset(exploreprop_p_summary,  Guide == "Sheet", Proportion, drop = TRUE)
+MeanDiffCI(explorepro_sheet, explorepro_octo)
+
+explorepro_b1 <- subset(exploreprop_p_summary,  Block == "B1", Proportion, drop = TRUE)
+explorepro_b2 <- subset(exploreprop_p_summary,  Block == "B2", Proportion, drop = TRUE)
+explorepro_b3 <- subset(exploreprop_p_summary,  Block == "B3", Proportion, drop = TRUE)
+MeanDiffCI(explorepro_b2, explorepro_b1)
+MeanDiffCI(explorepro_b3, explorepro_b2)
+```
+
+### Graph
+
+```{r}
+pd <- position_dodge(0.4)
+
+ggplot(data=exploreprop_summary, aes(x=Block, y=MeanValue, group=Guide)) +
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_line(aes(color=Guide), position=pd)+
+  geom_point(aes(color=Guide, shape=Guide), size=3, position=pd)+
+  geom_text(aes(label=sprintf("%.0f", 100*MeanValue), color=Guide), show.legend = FALSE,
+            size=4, nudge_x=ifelse(exploreprop_summary$Guide=="Octo", -0.3, 0.3),
+            nudge_y=ifelse(exploreprop_summary$Guide=="Octo", -0.05, 0.05)
+  )+
+  scale_y_continuous(labels = function(x) paste0(x*100),breaks = seq(0,1,0.25))+
+  # scale_y_continuous(labels = label_percent(), breaks = seq(0,1,0.25))+
+  expand_limits(y=c(0,1))+
+  labs(x="Block", y="Usage Rate (%)")+
+  scale_x_discrete(labels=c("B1-Train", "B2-Train", "B3-Train"))+
+  scale_color_manual(values = c("#d35400", "#95a5a6"))+
+  facet_grid(scales = "free", space = "free")+
+  theme_bw(base_size = 12)+
+  theme(panel.border = element_blank(),
+        axis.line = element_line(color = 'grey'),
+        legend.position = "none",
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+### Assumptions
+Shapiro test p < 0.05. The distribution of the residuals is not normal.
+
+```{r}
+m = aov(Proportion ~ Block*Guide + Error(Participant), data = exploreprop_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### Data Transformation
+Shapiro test p > 0.05. The distribution of the residuals is now normal.
+
+```{r}
+exploreprop_p_summary$TransVal = sqrt(exploreprop_p_summary$Proportion)
+m = aov(TransVal ~ Block*Guide + Error(Participant), data = exploreprop_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### ANOVA
+```{r}
+ezANOVA(
+  exploreprop_p_summary,
+  dv = TransVal,
+  wid = Participant,
+  within = c(Guide, Block)
+)
+```
+
+### Pairwise Comparison
+```{r}
+pairwise.t.test(exploreprop_p_summary$TransVal, 
+                exploreprop_p_summary$Block, 
+                paired=TRUE, 
+                p.adj="bonf")
+```
+
+## OCTO Exploration Mode Rate (during Training)
+
+```{r}
+exploreprop_octo_p_summary <- trials %>%
+  filter(Guide == "Octo" & Phase == "Training" & !IsOutlier) %>%
+  mutate(isExploring = ifelse(GripDuration>0, 1, 0)) %>%
+  group_by(Participant, Guide, Phase, Block) %>%
+  summarize(Frequency = sum(isExploring),
+            Total = sum(Mode=="Novice") + sum(Mode=="Expert"),
+            Proportion = (Frequency/Total),
+            .groups="drop")
+exploreprop_octo_p_summary
+
+exploreprop_octo_summary <- exploreprop_octo_p_summary %>%
+  group_by(Guide,Block) %>%
+  summarize(summary_with_ci(Proportion), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+exploreprop_octo_summary
+
+explorepro_octo_b1 <- subset(exploreprop_octo_p_summary,  Block == "B1", Proportion, drop = TRUE)
+explorepro_octo_b2 <- subset(exploreprop_octo_p_summary,  Block == "B2", Proportion, drop = TRUE)
+explorepro_octo_b3 <- subset(exploreprop_octo_p_summary,  Block == "B3", Proportion, drop = TRUE)
+MeanDiffCI(explorepro_octo_b2, explorepro_octo_b1)
+MeanDiffCI(explorepro_octo_b3, explorepro_octo_b1)
+```
+
+### Graph
+
+```{r}
+pd <- position_dodge(0.4)
+
+ggplot(data=exploreprop_octo_summary, aes(x=Block, y=MeanValue, group=Guide)) +
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_line(aes(color=Guide), position=pd)+
+  geom_point(aes(color=Guide, shape=Guide), size=3, position=pd)+
+  geom_text(aes(label=sprintf("%.0f", 100*MeanValue), color=Guide), show.legend = FALSE,
+            size=4, nudge_x=ifelse(exploreprop_octo_summary$Guide=="Octo", -0.3, 0.3),
+            nudge_y=ifelse(exploreprop_octo_summary$Guide=="Octo", -0.05, 0.05)
+  )+
+  scale_y_continuous(labels = function(x) paste0(x*100),breaks = seq(0,1,0.25))+
+  # scale_y_continuous(labels = label_percent(), breaks = seq(0,1,0.25))+
+  expand_limits(y=c(0,1))+
+  labs(x="Block", y="Usage Rate (%)")+
+  scale_x_discrete(labels=c("B1-Train", "B2-Train", "B3-Train"))+
+  scale_color_manual(values = c("#d35400", "#95a5a6"))+
+  facet_grid(scales = "free", space = "free")+
+  theme_bw(base_size = 12)+
+  theme(panel.border = element_blank(),
+        axis.line = element_line(color = 'grey'),
+        legend.position = "none",
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+### Assumptions
+Shapiro test p < 0.05. The distribution of the residuals is not normal.
+
+```{r}
+m = aov(Proportion ~ Block + Error(Participant), data = exploreprop_octo_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### Data Transformation
+Shapiro test p > 0.05. The distribution of the residuals is now normal.
+
+```{r}
+exploreprop_octo_p_summary$TransVal = sqrt(exploreprop_octo_p_summary$Proportion)
+m = aov(TransVal ~ Block + Error(Participant), data = exploreprop_octo_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### ANOVA
+```{r}
+ezANOVA(
+  exploreprop_octo_p_summary,
+  dv = TransVal,
+  wid = Participant,
+  within = c(Block)
+)
+```
+
+### Pairwise Comparison
+```{r}
+pairwise.t.test(exploreprop_octo_p_summary$TransVal, 
+                exploreprop_octo_p_summary$Block, 
+                paired=TRUE, 
+                p.adj="bonf")
+```
+
+## Explore Duration
+
+```{r}
+modedtime_p_summary <- trials %>%
+  filter(Mode == "Novice", Phase == "Training" & Result == TRUE & IsOutlier == FALSE) %>%
+  group_by(Participant, Guide, Phase, Block) %>%
+  summarize(MeanIdle = mean(IdleDuration), MeanGrip = mean(GripDuration), MeanTrigger = mean(TriggerDuration), .groups="drop")
+
+# because P4 has zero novice trial in B3, we averaged values between that of B1 and B2
+newRow = c("P4", "Sheet", "Training", "B3", 2.5109465, 7.72282145, 1.968268)
+modedtime_p_summary = rbind(modedtime_p_summary, newRow)
+# because P11 has zero novice trial in B3, we averaged values between that of B1 and B2
+newRow = c("P11", "Sheet", "Training", "B3", 3.3913335, 4.0635, 1.73475)
+# merge new row into table
+modedtime_p_summary = rbind(modedtime_p_summary, newRow)
+# # convert from character to numbers
+modedtime_p_summary$MeanIdle <- as.numeric(as.character(modedtime_p_summary$MeanIdle))
+modedtime_p_summary$MeanGrip <- as.numeric(as.character(modedtime_p_summary$MeanGrip))
+modedtime_p_summary$MeanTrigger <- as.numeric(as.character(modedtime_p_summary$MeanTrigger))
+
+modedtime_p_summary
+
+idletime_summary <- modedtime_p_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(MeanIdle), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+idletime_summary
+
+griptime_summary <- modedtime_p_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(MeanGrip), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+griptime_summary
+
+triggertime_summary <- modedtime_p_summary %>%
+  group_by(Guide, Phase, Block) %>%
+  summarize(summary_with_ci(MeanTrigger), .groups="drop") %>%
+  mutate(LowerValue = if_else(LowerValue < 0, 0, LowerValue))
+triggertime_summary
+```
+
+### Graph
+
+```{r}
+pd <- position_dodge(0.4)
+
+ggplot(data=griptime_summary, aes(x=Block, y=MeanValue, group=Guide)) +
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_line(aes(linetype=Guide, color=Guide), position=pd)+
+  geom_point(aes(color=Guide, shape=Guide), size=3, position=pd)+
+  geom_text(aes(label=format(round(MeanValue,3),nsmall=3), color=Guide),
+            size=4, nudge_x=ifelse(griptime_summary$Guide=="Octo", -0.35, 0.35),
+            nudge_y=ifelse(griptime_summary$Guide=="Octo", -0.4, 0.4)
+  )+
+  expand_limits(y=c(0,6))+
+  labs(x="Block", y="Explore Duration (s)")+
+  facet_grid(~Phase, scales = "free", space = "free")+
+  theme(legend.position = "none",
+        #legend.position = c(0.85, 0.85), legend.direction = "vertical",
+        axis.text.x = element_text(size = 10), axis.text.y = element_text(size = 10),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+### Assumptions
+Shapiro test p < 0.05. The distribution of the residuals is not normal.
+
+```{r}
+m = aov(MeanGrip ~ Block*Guide + Error(Participant), data = modedtime_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### Data Transformation
+Shapiro test p > 0.05. The distribution of the residuals is now normal.
+
+```{r}
+modedtime_p_summary$TransVal = sqrt(modedtime_p_summary$MeanGrip)
+m = aov(TransVal ~ Block*Guide + Error(Participant), data = modedtime_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+### ANOVA
+
+```{r}
+ezANOVA(
+  modedtime_p_summary,
+  dv = sqrt(MeanGrip),
+  wid = Participant,
+  within = c(Guide, Block)
+)
+```
+
+### Pairwise Comparison
+```{r}
+pairwise.t.test(sqrt(modedtime_p_summary$MeanGrip), 
+                modedtime_p_summary$Block, 
+                paired=TRUE, 
+                p.adj="bonf")
+```
+
+## Draw Duration
+
+### Graph
+
+```{r}
+pd <- position_dodge(0.4)
+
+ggplot(data=triggertime_summary, aes(x=Block, y=MeanValue, group=Guide)) +
+  geom_errorbar(aes(ymin=LowerValue, ymax=UpperValue), width=.3, position=pd) +
+  geom_line(aes(linetype=Guide, color=Guide), position=pd)+
+  geom_point(aes(color=Guide, shape=Guide), size=3, position=pd)+
+  geom_text(aes(label=format(round(MeanValue,3),nsmall=3), color=Guide),
+            size=4, nudge_x=ifelse(triggertime_summary$Guide=="Octo", -0.35, 0.35),
+            nudge_y=ifelse(triggertime_summary$Guide=="Octo", -0.4, 0.4)
+  )+
+  expand_limits(y=c(0,6))+
+  labs(x="Block", y="Draw Duration (s)")+
+  facet_grid(~Phase, scales = "free", space = "free")+
+  theme(legend.position = c(0.85, 0.15), legend.direction = "vertical",
+        axis.text.x = element_text(size = 10), axis.text.y = element_text(size = 10),
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)))
+```
+
+### Assumptions
+Shapiro test p > 0.05. The distribution of the residuals is normal.
+
+```{r}
+m = aov(MeanTrigger ~ Block*Guide + Error(Participant), data = modedtime_p_summary)
+shapiro.test(residuals(m$Within))
+plotNormalHistogram(residuals(m$Within))
+qqnorm(residuals(m$Within)); qqline(residuals(m$Within))
+```
+
+### ANOVA
+
+```{r}
+ezANOVA(
+  modedtime_p_summary,
+  dv = MeanTrigger,
+  wid = Participant,
+  within = c(Guide, Block)
+)
+```
+
+# SUBJECTIVE RATING
+
+```{r}
+ratingParticipant <- read_csv("./data2.csv")
+ratingCount <- read_csv("./data3.csv")
+overall <- read_csv("./data4.csv")
+length(unique(overall$Participant))
+ratingParticipant
+
+names(ratingCount)[3] <- "Strongly\nDisagree"
+names(ratingCount)[5] <- "Slightly\nDisagree"
+names(ratingCount)[7] <- "Slightly\nAgree"
+names(ratingCount)[9] <- "Strongly\nAgree"
+ratingCount
+
+likert(Question ~ .| Guide, data=ratingCount, layout=c(1,2),
+       scales=list(y=list(relation="free")),between=list(y=2.5),
+       strip.left=FALSE, strip=FALSE,
+       par.strip.text=list(cex=1, lines=2), ylab=NULL, cex=1.2,
+       xlim=c(-100,-50, -25, 0, 25, 50, 75, 100),
+       ReferenceZero=4, as.percent="noRightAxis",
+       reference.line.col="black",
+       col=c("#D31819", "#FF792E", "#FFAE73", "#DED9D9", "#74AED5", "#3881B8", "#0E529F"),
+       borders = list(),
+       positive.order=FALSE,
+       main = list(""),
+       xlab="Proportion (%)",
+       auto.key=list(space="bottom", rows=1, reverse=FALSE, padding.text=1,
+                     rect= list(col=c("#D31819", "#FF792E", "#FFAE73", "#DED9D9", "#74AED5", "#3881B8", "#0E529F"), # <- Specify colors again (for keys)
+                    border = "black")))
+
+# export to pdf: 4.0 x 8.5 inch
+```
+
+```{r}
+ratingParticipantLong = pivot_longer(ratingParticipant, cols = 5:9, names_to = "Question", values_to = "Rating")
+ratingParticipantLong
+
+wilcox <- ratingParticipantLong %>%
+  group_by(Question) %>%
+  wilcox_test(Rating ~ Guide, paired=TRUE) %>%
+  add_significance("p")
+wilcox
+```
+
